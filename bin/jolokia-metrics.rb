@@ -1,270 +1,145 @@
-#!/usr/bin/env ruby
-#
-#   sensu-mertic-jmx-jolokia
+#! /usr/bin/env ruby
+# frozen_string_literal: false
+
+#   jolokia-metrics.rb
 #
 # DESCRIPTION:
-#   Monitoring of JMX beans via Jolokia
+#   Read metrics from jolokia HTTP endpoint.
 #
-# DEBUG:
-#  search:
-#     curl http://localhost:8544/jolokia/list/*:* -s |jq '.'
-#  read:
-#     curl 'http://localhost:8544/jolokia/read/java.lang:type=ClassLoading' -s |jq '.'
+# OUTPUT:
+#   Graphite formatted data
+#
+# PLATFORMS:
+#   Linux
+#
+# DEPENDENCIES:
+#   gem: sensu-plugin
+#   gem: rest-client
+#
+# USAGE:
+#   EX: ./jolokia-metrics.rb -u http://127.0.0.1:8080/jolokia/read -f jmx_beans.yaml
 #
 # LICENSE:
 #   Arnaud Delalande  <arnaud.delalande@adevo.fr>
+#   Francois Gouteroux <francois.gouteroux@gmail.com>
 #   Released under the same terms as Sensu (the MIT license); see LICENSE
 #   for details.
+#
 
-require 'rubygems' if RUBY_VERSION < '1.9.0'
 require 'sensu-plugin/metric/cli'
-require 'json'
-require 'net/http'
-require 'cgi'
+require 'rest-client'
 require 'socket'
 require 'yaml'
-
-
-class MerticJmxJolokia  < Sensu::Plugin::Metric::CLI::Graphite
-  option :scheme,
-    :description => "Metric naming scheme, text to prepend to metric",
-    :short => "-s SCHEME",
-    :long => "--scheme SCHEME",
-    :default => "app.myapp.:::name:::.jolokia"
-
+require 'json'
+#
+# Jolokia2Graphite - see description above
+#
+class Jolokia2Graphite < Sensu::Plugin::Metric::CLI::Graphite
   option :url,
-    :short => '-u URL',
-    :long => '--url URL',
-    :default => 'http://127.0.0.1:8544/admin',
-    :description => 'The base URL to connect to (including port)'
+         description: 'Full URL to the endpoint',
+         short: '-u URL',
+         long: '--url URL',
+         default: 'http://localhost:8778/jolokia/read'
 
-  option :path,
-    :short => '-p PATH',
-    :default => 'jolokia/read',
-    :description => 'The URL path to the base of Jolokia'
+  option :scheme,
+         description: 'Metric naming scheme',
+         short: '-s SCHEME',
+         long: '--scheme SCHEME',
+         default: Socket.gethostname.to_s.gsub!('.', '_')
 
-  option :timeout,
-    :short => '-t SECS',
-    :proc => proc { |a| a.to_i },
-    :default => 15,
-    :description => 'URL request timeout, in seconds'
+  option :file,
+         description: 'File path with metrics definitions to retrieve',
+         short: '-f FILE',
+         long: '--file FILE'
+
+  option :insecure,
+         description: 'By default, every SSL connection made is verified to be secure. This option allows you to disable the verification',
+         short: '-k',
+         long: '--insecure',
+         boolean: true,
+         default: false
 
   option :debug,
-    :short => '-d TRUE',
-    :long => '--debug TRUE',
-    :default => false,
-    :description => 'Debug mode'
+         short: '-d',
+         long: '--debug',
+         default: false
 
-  option :configfile,
-    :short => '-c CONFIGFILE',
-    :long =>  '--configfile CONFIGFILE',
-    :default => false,
-    :description => 'Json or Yaml file with jolokia request'
+  def deep_value(metric, input, timestamp, patterns)
+    case input
+    when Hash
+      input.each do |key, value|
+        deep_value("#{metric}.#{escape_metric(key, patterns)}", value, timestamp, patterns)
+      end
+    when Numeric
+      output metric, input, timestamp
+    end
+  end
 
-  option :all,
-    :short => '-a',
-    :long =>  '--all',
-    :default => false,
-    :description => 'show all avalible metrics, ignore all other options'
+  def escape_metric(name, patterns)
+    res = name.dup
 
-  option :credfile,
-    :short => '-f',
-    :long =>  '--credfile',
-    :default => false,
-    :description => 'yaml file with username and password'
-
+    if patterns.empty?
+      patterns = [
+        ['*', '_'],
+        ['.', '_'],
+        [',', '.'],
+        [' ', '_'],
+        ['(', ''],
+        [')', ''],
+        [':', '.'],
+        ['=', '.']
+      ]
+    end
+    patterns.each { |replace| res.gsub!(replace[0], replace[1]) }
+    res
+  end
 
   def run
-    hostname = Socket.gethostname.gsub(".", "_")
-    config[:scheme] = config[:scheme].gsub(":::name:::", hostname)
+    puts "args config: #{config}" if config[:debug]
 
-    if config[:credfile]
-      credfile = YAML.load_file(config[:configfile])
-      config[:user] = credfile['user']
-      config[:password] = credfile['password']
+    begin
+      cnf = YAML.load_file(config[:file])
+      patterns = cnf['patterns'] || []
+    rescue StandardError => e
+      puts "Error: #{e.backtrace}"
+      critical "Error: #{e}"
     end
 
-    #config[:user] = '<%= @mgmt_user %>'
-    #config[:password] = '<%= @mgmt_passwd %>'
-    
-    if config[:all]
-      show_all
+    begin
+      data = RestClient::Request.execute(
+        url: config[:url],
+        method: :post,
+        payload: cnf['data'].to_json,
+        headers: { content_type: 'application/json' },
+        verify_ssl: !config[:insecure]
+      )
+      puts "Http response: #{data}" if config[:debug]
 
-    elsif config[:configfile]:
-      conffile = YAML.load_file(config[:configfile])
-      request = conffile or []
-
-      data = post_url([config[:url], 'jolokia'].join('/'), request)
-      #output data.to_yaml
-      if data.is_a?(Hash) and data['status'] != 200:
-        output "Error: #{data.to_yaml}"
-        raise "Jolokia reports error"
+      ::JSON.parse(data).each do |resp|
+        if !resp['status'] || (resp['status'] != 200)
+          err = resp.to_yaml[0..300]
+          if config[:debug]
+            err = resp.to_yaml
+          end
+          warn "Error status: #{resp['status']} - Stacktrace: #{err}"
+          next
+        end
+        mbean = resp['request']['mbean']
+        attribute = resp['request']['attribute']
+        path      = resp['request']['path']
+        if mbean && !mbean.include?('*')
+          path_ =  [mbean, attribute, path].reject { |c| !c || c.is_a?(Array) }.map { |c| escape_metric(c, patterns) }.join('.')
+          metric = [config[:scheme].to_s, path_].select { |c| c }.compact.join('.')
+        else
+          metric = config[:scheme].to_s
+        end
+        deep_value(metric.to_s, resp['value'], resp['timestamp'], patterns)
       end
-      data.each{ |resp|
-         #output resp.to_yaml
-         if !resp['status'] or  resp['status'] != 200 
-             output "Error: #{resp.to_yaml}"
-             next
-         end
-         mbean     = resp['request']['mbean']
-         attribute = resp['request']['attribute']
-         path      = resp['request']['path']
-         if mbean and !  mbean.include? '*' 
-            path_ =  [mbean, attribute, path].reject { |c| !c or c.is_a? Array   }.map{|c| escape_metric_name(c)}.join('.')
-            base = ["#{config[:scheme]}", path_].reject { |c| !c }.compact.join('.')
-         else
-            base = "#{config[:scheme]}"
-         end
-         deep_output("#{base}", resp['value'], resp['timestamp'] )
-      }
+    rescue Errno::ECONNREFUSED
+      critical "#{config[:url]} is not responding"
+    rescue RestClient::RequestTimeout
+      critical "#{config[:url]} Connection timed out"
     end
     ok
   end
-
-  def show_all()
-   # List all beans and show one by one 
-   res = post_url([config[:url], 'jolokia'].join('/'), {'type' => 'list'})
-    #output res.to_yaml
-    if res['status'] != 200:
-      output "Error while listing, #{res}"
-    end
-
-    res['value'].sort_by { |k,v| k}.each{|domain_name, domain|
-       domain.each{|prop_name, prop|
-         prop['attr'].each{|attr_name, attr|
-           #output attr.to_yaml
-           request = {
-             'type'  => 'read',
-             'mbean' => "#{domain_name}:#{prop_name}",
-             'attribute' => attr_name,
-           }
-           base = "#{config[:scheme]}.#{ escape_metric_name(request['mbean'])}.#{ escape_metric_name(request['attribute'])}"
-           output "{\"type\": \"read\",  \"mbean\": \"#{request['mbean']}\",  \"attribute\": \"#{request['attribute']}\"}" 
-
-           begin
-             res2 = post_url([config[:url], 'jolokia'].join('/'), request)
-           rescue Exception => e
-             output "#{base} Error: #{e}"
-             next
-           end
-           if res2['status'] == 200
-              deep_output("#{base}", res2['value'], res2['timestamp'] )
-           else
-              output "#{base}", 'ERROR:',  res2['error']
-           end
-         } if prop.key?('attr')
-       }
-    }
-
-  end
-
-
-  def escape_metric_name(name)
-    res = name.dup
-    [ 
-      ['"',                     ''],
-#      [/\d+[.]\d+[.]\d+[.]\d+/, "-"], # we can have several applications on the same host
-#      [/port=\d\d\d\d/,         "port=-"],
-#      [/-\d\d\d\d/,             "--"],
-      ['*',                     '_'],
-      ['.',                     '_'],
-      [',',                     '.'],
-      [' ',                     '_'],
-      ['(',                     ''],
-      [')',                     ''],
-      [':',                     '.'],
-    ].each {|replacement| res.gsub!(replacement[0], replacement[1])}
-    return res
-  end
-
-  def deep_output(basic_name, input, timestamp)
-    mapper = { 'UP' => 1, 'DOWN' => 0, 'STARTED'=>1}
-
-    case input
-    when Hash
-      input.each {|key, value|
-        deep_output("#{basic_name}.#{escape_metric_name(key)}", value, timestamp)
-      }
-    when Numeric
-      output        "#{basic_name}", input, timestamp
-    when String
-      output        "#{basic_name}", mapper[input], timestamp if mapper.key?(input)
-    end
-    
-  end
-
-  def get_bean (mbean, attribute='')
-    get_url ([config[:url], config[:path], mbean].compact.join('/'))
-  end
-
-  def get_url (url)
-    uri = URI.parse(url)
-    http = Net::HTTP.new(uri.host, uri.port)
-    if uri.scheme == 'https'
-       http.use_ssl = true
-       http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-    end
-    req = Net::HTTP::Get.new(uri.request_uri)
-    req.basic_auth(config[:user], config[:password]) if config[:user]
-    output "DEBUG:", uri, "\n" if config[:debug]
-
-    begin
-      res = Timeout.timeout(config[:timeout]) do
-        http.request(req)
-      end
-    rescue Timeout::Error
-      raise "Jolokia connection timed out. #{uri} "
-    rescue => e
-      raise "Jolokia connection error:  #{uri} #{e.message}"
-    end
-
-    case res.code
-    when /^2/
-      begin
-        json = JSON.parse(res.body)
-      rescue JSON::ParserError
-        raise "Jolokia returns invalid JSON. url = #{uri} "
-      end
-    else
-      raise "Jolokia endpoint inaccessible (#{res.code}). url = #{uri}"
-    end
-  end
-
-  def post_url (url, payload)
-    uri = URI.parse(url)
-    http = Net::HTTP.new(uri.host, uri.port)
-    if uri.scheme == 'https'
-       http.use_ssl = true
-       http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-    end
-    header = {'Content-Type' => 'text/json'}
-    req = Net::HTTP::Post.new(uri.request_uri, header)
-    req.basic_auth(config[:user], config[:password]) if config[:user]
-    req.body = payload.to_json
-    output "DEBUG:", uri, "\n" if config[:debug]
-
-    begin
-      res = Timeout.timeout(config[:timeout]) do
-        http.request(req)
-      end
-    rescue Timeout::Error
-      raise "Jolokia connection timed out. #{uri} "
-    rescue => e
-      raise "Jolokia connection error:  #{uri} #{e.message}"
-    end
-
-    case res.code
-    when /^2/
-      begin
-        json = JSON.parse(res.body)
-      rescue JSON::ParserError
-        raise "Jolokia returns invalid JSON. url = #{uri} "
-      end
-    else
-      raise "Jolokia endpoint inaccessible (#{res.code}). url = #{uri}"
-    end
-  end
-
 end
-
-

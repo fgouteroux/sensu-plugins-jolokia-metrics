@@ -1,0 +1,3 @@
+data:
+  - {"type": "read",  "mbean": "java.lang:type=Memory"}
+  - {"type": "read",  "mbean": "java.lang:type=Threading"}
