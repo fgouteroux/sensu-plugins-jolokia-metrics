@@ -101,6 +101,15 @@ spec:
 
 Collect jolokia metrics defined in an yaml file with one single post request.
 
+each json should follow jolokia's api POST read request <https://jolokia.org/reference/html/protocol.html>:
+
+```json
+{
+   "type":"read",
+   "mbean":"java.lang:type=Threading",
+   "attribute":"ThreadCount",
+}
+```
 
 **/tmp/metrics.beans.yaml**
 ```yaml
@@ -111,6 +120,7 @@ data:
   - {"type": "read",  "mbean": "kafka.server:type=BrokerTopicMetrics,name=MessagesInPerSec"}
   - {"type": "read",  "mbean": "kafka.server:type=BrokerTopicMetrics,name=BytesInPerSec"}
   - {"type": "read",  "mbean": "kafka.server:type=BrokerTopicMetrics,name=BytesOutPerSec"}
+  - {"type": "read", "mbean": "Catalina:name=*,type=ThreadPool", "attribute": "acceptorThreadCount,currentThreadsBusy"}
 ```
 
 It's possible to define custom patterns to escape metric characters.
