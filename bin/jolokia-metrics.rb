@@ -64,17 +64,31 @@ class Jolokia2Graphite < Sensu::Plugin::Metric::CLI::Graphite
          long: '--debug',
          default: false
 
-  def deep_value(metric, input, timestamp, patterns)
+  def deep_value(metric, input, timestamp, patterns, result_mapper)
     case input
     when Hash
       input.each do |key, value|
-        deep_value("#{metric}.#{escape_metric(key, patterns)}", value, timestamp, patterns)
+        deep_value("#{metric}.#{escape_metric(key, patterns)}", value, timestamp, patterns, result_mapper)
       end
     when Numeric
       output metric, input, timestamp
+    when String
+      output metric, convert_metric_mapper(input, result_mapper), timestamp
     end
   end
 
+  def convert_metric_mapper(name, result_mapper)
+    res = name.dup
+    unless !result_mapper.empty?
+      result_mapper = [
+        ['UP', '1'],
+        ['DOWN', '0'],
+      ]
+    end
+    result_mapper.each {|replace| res.gsub!(replace[0], replace[1])}
+    return res
+  end
+  
   def escape_metric(name, patterns)
     res = name.dup
 
@@ -100,6 +114,7 @@ class Jolokia2Graphite < Sensu::Plugin::Metric::CLI::Graphite
     begin
       cnf = YAML.load_file(config[:file])
       patterns = cnf['patterns'] || []
+      result_mapper = cnf['result_mapper'] || []
     rescue StandardError => e
       puts "Error: #{e.backtrace}"
       critical "Error: #{e}"
@@ -133,7 +148,7 @@ class Jolokia2Graphite < Sensu::Plugin::Metric::CLI::Graphite
         else
           metric = config[:scheme].to_s
         end
-        deep_value(metric.to_s, resp['value'], resp['timestamp'], patterns)
+        deep_value(metric.to_s, resp['value'], resp['timestamp'], patterns, result_mapper)
       end
     rescue Errno::ECONNREFUSED
       critical "#{config[:url]} is not responding"
