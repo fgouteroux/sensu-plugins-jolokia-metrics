@@ -145,6 +145,18 @@ patterns:
 
 If this key 'patterns' is not defined default value are applied.
 
+It's possible to map result value to fit graphite pattern.
+Is some case the result value can be boolean: DOWN/UP => 0/1
+
+To map this kind of result, add the key 'result_mapper' in config file:
+
+```yaml
+result_mapper:
+  UP: 1
+  DOWN: 0
+```
+
+If this key 'result_mapper' is not defined default value are applied.
 
 ## Installation
 
