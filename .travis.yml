@@ -10,7 +10,6 @@ before_install:
 install:
 - bundle install
 rvm:
-- 2.3.0
 - 2.4.1
 notifications:
   email:
@@ -33,7 +32,6 @@ deploy:
   on:
     tags: true
     all_branches: true
-    rvm: 2.3.0
     rvm: 2.4.1
     repo: fgouteroux/sensu-plugins-jolokia-metrics
 - provider: script
