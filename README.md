@@ -152,8 +152,8 @@ To map this kind of result, add the key 'result_mapper' in config file:
 
 ```yaml
 result_mapper:
-  - ['UP', '1']    # default value
-  - ['DOWN', '0']    # default value
+  UP: 1
+  DOWN: 0
 ```
 
 If this key 'result_mapper' is not defined default value are applied.

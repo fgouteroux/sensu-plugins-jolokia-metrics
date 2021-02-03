@@ -73,22 +73,10 @@ class Jolokia2Graphite < Sensu::Plugin::Metric::CLI::Graphite
     when Numeric
       output metric, input, timestamp
     when String
-      output metric, convert_metric_mapper(input, result_mapper), timestamp
+      output metric, result_mapper[input], timestamp if result_mapper.key?(input)
     end
   end
 
-  def convert_metric_mapper(name, result_mapper)
-    res = name.dup
-    unless !result_mapper.empty?
-      result_mapper = [
-        ['UP', '1'],
-        ['DOWN', '0'],
-      ]
-    end
-    result_mapper.each {|replace| res.gsub!(replace[0], replace[1])}
-    return res
-  end
-  
   def escape_metric(name, patterns)
     res = name.dup
 
@@ -114,7 +102,7 @@ class Jolokia2Graphite < Sensu::Plugin::Metric::CLI::Graphite
     begin
       cnf = YAML.load_file(config[:file])
       patterns = cnf['patterns'] || []
-      result_mapper = cnf['result_mapper'] || []
+      result_mapper = cnf['result_mapper'] || {}
     rescue StandardError => e
       puts "Error: #{e.backtrace}"
       critical "Error: #{e}"
